@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="InfiniLore.InfiniFrame" Version="0.62.1" />
+    <PackageReference Include="InfiniLore.InfiniFrame.Js" Version="0.62.1" GeneratePathProperty="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="www/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- The page loads /InfiniFrame.js through the custom scheme: copy it from the package. -->
+  <Target Name="CopyInfiniFrameJs" AfterTargets="Build">
+    <Copy SourceFiles="$(PkgInfiniLore_InfiniFrame_Js)/staticwebassets/InfiniFrame.js" DestinationFolder="$(OutDir)www" />
+  </Target>
+</Project>

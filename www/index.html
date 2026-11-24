@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><script src="/InfiniFrame.js"></script></head>
+<body>
+<pre id="out"></pre>
+<script>
+let n = 0;
+// Side channel: an image load goes through the scheme handler, even with a null origin.
+function log( text ) {
+  document.getElementById( 'out' ).textContent += text + '\n';
+  new Image().src = '/log/' + (++n) + '?' + encodeURIComponent( text );
+}
+const timeoutMs = 5000;
+let nextId = 1;
+const MB = 1024 * 1024;
+
+// Transport 1: InfiniFrame.js (messaging.sendMessageToHost / assignMessageReceivedHandler).
+const jsPending = new Map();
+function jsCall( body ) {
+  const id = nextId++;
+  return new Promise( ( resolve, reject ) => {
+    jsPending.set( id, resolve );
+    window.infiniframe.messaging.sendMessageToHost( 'repro:js', JSON.stringify( { id, body } ) );
+    setTimeout( () => reject( new Error( 'no answer in ' + timeoutMs + ' ms' ) ), timeoutMs );
+  } );
+}
+
+// Transport 2: the same envelopes, straight to chrome.webview (no InfiniFrame.js parser).
+const directPending = new Map();
+function directCall( body ) {
+  const id = nextId++;
+  return new Promise( ( resolve, reject ) => {
+    directPending.set( id, resolve );
+    const envelope = { id: 'repro:direct', command: 'Post', version: 2, data: JSON.stringify( { id, body } ) };
+    window.chrome.webview.postMessage( JSON.stringify( envelope ) );
+    setTimeout( () => reject( new Error( 'no answer in ' + timeoutMs + ' ms' ) ), timeoutMs );
+  } );
+}
+
+async function measure( label, call, body ) {
+  const t = performance.now();
+  try {
+    const r = await call( body );
+    log( label + ': OK, answer of ' + r.length + ' chars in ' + (performance.now() - t).toFixed( 0 ) + ' ms' );
+  } catch( e ) {
+    log( label + ': FAILED (' + e.message + ')' );
+  }
+}
+
+async function run() {
+  log( '--- 1. Origin of a page served by the custom scheme' );
+  log( 'location.href = ' + location.href + ' (a deep link, served by the handler fallback)' );
+  log( 'location.origin = ' + location.origin );
+  try { const r = await fetch( '/data.json' ); log( 'fetch GET /data.json: ' + r.status + ' ' + (await r.text()).trim() ); }
+  catch( e ) { log( 'fetch GET /data.json: FAILED (' + e + ')' ); }
+  try { localStorage.setItem( 'k', 'v' ); log( 'localStorage: ' + localStorage.getItem( 'k' ) ); }
+  catch( e ) { log( 'localStorage: FAILED (' + e + ')' ); }
+
+  log( '--- 2. A POST to the custom scheme' );
+  try {
+    const r = await fetch( '/api/echo', { method: 'POST', body: '{"some":"body"}', headers: { 'Content-Type': 'application/json' } } );
+    log( 'fetch POST /api/echo: ' + r.status + ' ' + (await r.text()) + ' (the body and the method are lost)' );
+  } catch( e ) { log( 'fetch POST /api/echo: FAILED (' + e + ')' ); }
+
+  log( '--- 3. Messaging through InfiniFrame.js' );
+  try { window.chrome.webview.postMessage( 'a raw string, not an envelope' ); log( 'posted a raw string (it never reaches RegisterWebMessageReceivedHandler)' ); }
+  catch( e ) { log( 'raw postMessage: FAILED (' + e + ')' ); }
+  try {
+    window.infiniframe.messaging.assignMessageReceivedHandler( 'repro:js', payload => {
+      const m = JSON.parse( payload ); const r = jsPending.get( m.id ); if( r ) { jsPending.delete( m.id ); r( m.body ); }
+    } );
+    await measure( 'small request', jsCall, 'hello' );
+    await measure( '512 KB request', jsCall, 'x'.repeat( 512 * 1024 ) );
+    const t = performance.now();
+    const all = await Promise.all( Array.from( { length: 100 }, ( _, i ) => jsCall( 'n' + i ) ) );
+    log( '100 concurrent requests: ' + (all.every( ( v, i ) => v === 'n' + i ) ? 'all matched' : 'MISMATCH') + ' in ' + (performance.now() - t).toFixed( 0 ) + ' ms' );
+    await measure( '1 MiB request (over the cap)', jsCall, 'x'.repeat( MB ) );
+  } catch( e ) { log( 'InfiniFrame.js messaging: FAILED (' + e.message + ')' ); }
+
+  log( '--- 4. The cap per direction, without InfiniFrame.js' );
+  try {
+    window.chrome.webview.addEventListener( 'message', ev => {
+      let e; try { e = JSON.parse( ev.data ); } catch { return; }
+      if( e && e.id === 'repro:direct' ) { const m = JSON.parse( e.data ); const r = directPending.get( m.id ); if( r ) { directPending.delete( m.id ); r( m.body ); } }
+    } );
+    await measure( 'page -> host 0.99 MB', directCall, 'y'.repeat( Math.floor( 0.99 * MB ) ) );
+    await measure( 'page -> host 1.01 MB', directCall, 'y'.repeat( Math.floor( 1.01 * MB ) ) );
+    await measure( 'host -> page 2 MB', directCall, 'BIG:' + 2 * MB );
+    await measure( 'host -> page 16 MB', directCall, 'BIG:' + 16 * MB );
+  } catch( e ) { log( 'direct messaging: FAILED (' + e.message + ')' ); }
+  log( 'DONE' );
+}
+setTimeout( run, 500 );
+</script>
+</body>
+</html>
